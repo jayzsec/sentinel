@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -77,8 +78,11 @@ func main() {
 	seed := uint64(time.Now().UnixNano())
 	rng := rand.New(rand.NewPCG(seed, seed))
 
-	// The URL where our Sentinel is listening
-	sentinelURL := "http://localhost:8080/events"
+	// We check the environment for a URL. If it's empty, we fall back to localhost.
+	sentinelURL := os.Getenv("SENTINEL_URL")
+	if sentinelURL == "" {
+		sentinelURL = "http://localhost:8080/events"
+	}
 
 	fmt.Println("POS Event Stream Generator Online.")
 	fmt.Printf("Transmitting live data to Sentinel at: %s\n", sentinelURL)
