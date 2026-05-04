@@ -1,5 +1,5 @@
 # Stage 1: Build the GO binary
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26.2-alpine AS builder
 LABEL authors="jayzsec"
 WORKDIR /app
 COPY go.mod ./
