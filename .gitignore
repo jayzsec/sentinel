@@ -1,2 +1,5 @@
 # Linux directory
 .directory
+
+# Jetbrains
+.idea/
