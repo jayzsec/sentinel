@@ -1,0 +1,27 @@
+services:
+
+  # Core / Brain
+  sentinel:
+    build:
+      context: ./sentinel-soc
+    ports:
+      - "8080:8080" # Exposes the API to our local machine so we can still use cURL
+    networks:
+      - hospitality-net
+
+  # API / Floor Stream
+  generator:
+    build:
+      context: ./pos-generator
+    environment:
+    # We tell the generator to look for the host named "sentinel" on the Docker network
+      - SENTINEL_URL=http://sentinel:8080/events
+    depends_on:
+      - sentinel
+    networks:
+      - hospitality-net
+
+# Private Network
+networks:
+  hospitality-net:
+    driver: bridge
