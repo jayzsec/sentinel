@@ -84,6 +84,12 @@ func main() {
 		sentinelURL = "http://localhost:8080/events"
 	}
 
+	// Add the new environment variable for our C# API
+	analyticsURL := os.Getenv("ANALYTICS_URL")
+	if analyticsURL == "" {
+		analyticsURL = "http://localhost:5192/ingest"
+	}
+
 	fmt.Println("POS Event Stream Generator Online.")
 	fmt.Printf("Transmitting live data to Sentinel at: %s\n", sentinelURL)
 	fmt.Println("Press Ctrl+C to stop.")
@@ -118,30 +124,50 @@ func main() {
 		}
 
 		// Send the HTTP POST request to the Sentinel
-		req, err := http.NewRequest(http.MethodPost, sentinelURL, bytes.NewBuffer(jsonData))
-		if err != nil {
-			fmt.Printf("Error creating request: %s\n", err)
-			continue
-		}
-		// Tell the Sentinel we are sending JSON data
-		req.Header.Set("Content-Type", "application/json")
+		// Update - Fire to Sentinel in a concurrent Goroutine
+		go func() {
+			req, _ := http.NewRequest(http.MethodPost, sentinelURL, bytes.NewBuffer(jsonData))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
 
-		// Execute the request
-		resp, err := client.Do(req)
-		if err != nil {
-			// If the Sentinel is down, we catch the error but keep the generator running!
-			fmt.Printf("\n[!] Connection Error: Sentinel is unreachable (%s)\n", err.Error())
-			continue
-		}
+		// Fire to Analytics Engine in a concurrent Goroutine
+		go func() {
+			req, _ := http.NewRequest(http.MethodPost, analyticsURL, bytes.NewBuffer(jsonData))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
 
-		// Close the response body to prevent memory leaks (Crucial Go best practice!)
-		if err := resp.Body.Close(); err != nil {
-			fmt.Printf("Error closing response body: %s\n", err)
-		}
+		//req, err := http.NewRequest(http.MethodPost, sentinelURL, bytes.NewBuffer(jsonData))
+		//if err != nil {
+		//	fmt.Printf("Error creating request: %s\n", err)
+		//	continue
+		//}
+		//// Tell the Sentinel we are sending JSON data
+		//req.Header.Set("Content-Type", "application/json")
+		//
+		//// Execute the request
+		//resp, err := client.Do(req)
+		//if err != nil {
+		//	// If the Sentinel is down, we catch the error but keep the generator running!
+		//	fmt.Printf("\n[!] Connection Error: Sentinel is unreachable (%s)\n", err.Error())
+		//	continue
+		//}
+		//
+		//// Close the response body to prevent memory leaks (Crucial Go best practice!)
+		//if err := resp.Body.Close(); err != nil {
+		//	fmt.Printf("Error closing response body: %s\n", err)
+		//}
 
 		// Print local feedback
 		if currentEvent.Action == "Void" {
-			fmt.Printf("-> Sent Anomaly (Void) to Sentinel. Status: %d\n", resp.StatusCode)
+			fmt.Println("-> Broadcasted Anomaly (Void) to network.")
 		} else {
 			fmt.Printf(".")
 		}

@@ -1,11 +1,20 @@
 services:
 
-  # Core / Brain
+  # Core / Brain / Go Security Agent
   sentinel:
     build:
       context: ./sentinel-soc
     ports:
       - "8080:8080" # Exposes the API to our local machine so we can still use cURL
+    networks:
+      - hospitality-net
+
+  # Enterprise Analytics Engine
+  analytics:
+    build:
+      context: ./analytics-engine
+    ports:
+      - "5192:8080" # Maps local port 5192 to the container's port 8080
     networks:
       - hospitality-net
 
@@ -16,8 +25,10 @@ services:
     environment:
     # We tell the generator to look for the host named "sentinel" on the Docker network
       - SENTINEL_URL=http://sentinel:8080/events
+      - ANALYTICS_URL=http://analytics:8080/ingest
     depends_on:
       - sentinel
+      - analytics
     networks:
       - hospitality-net
 
