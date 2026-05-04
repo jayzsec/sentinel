@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
 	"time"
 )
 
@@ -75,15 +77,22 @@ func main() {
 	seed := uint64(time.Now().UnixNano())
 	rng := rand.New(rand.NewPCG(seed, seed))
 
-	fmt.Println("Starting POS Event Stream...")
-	fmt.Println("Press Ctrl+C to stop.")
+	// The URL where our Sentinel is listening
+	sentinelURL := "http://localhost:8080/events"
 
-	// 2. Generate a single event to test our logic
-	// testEvent := generateNormalEvent(rng)
+	fmt.Println("POS Event Stream Generator Online.")
+	fmt.Printf("Transmitting live data to Sentinel at: %s\n", sentinelURL)
+	fmt.Println("Press Ctrl+C to stop.")
 
 	// Create a ticker that fires every 2 seconds to simulate busy traffic
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop() // Good practice to clean up resources
+
+	// We create a reusable HTTP client. It's a best practice to set a timeout
+	// so our generator doesn't freeze if the Sentinel crashes.
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
 
 	// Start an infinite loop to listen to the ticker
 	for {
@@ -97,26 +106,40 @@ func main() {
 			currentEvent = generateNormalEvent(rng)
 		}
 
-		// Use json.Marshal instead of MarshalIndent so each event is on a single line.
-		// This is standard practice for logging streams and piping to other applications.
+		// Convert our struct to JSON
 		jsonData, err := json.Marshal(currentEvent)
 		if err != nil {
-			fmt.Printf(`{"error": "Failed to generate JSON: %s"}\n`, err)
+			fmt.Printf("Error generating JSON: %s\n", err)
 			continue
 		}
 
-		// Print the JSON string to standard output
-		fmt.Println(string(jsonData))
+		// Send the HTTP POST request to the Sentinel
+		req, err := http.NewRequest(http.MethodPost, sentinelURL, bytes.NewBuffer(jsonData))
+		if err != nil {
+			fmt.Printf("Error creating request: %s\n", err)
+			continue
+		}
+		// Tell the Sentinel we are sending JSON data
+		req.Header.Set("Content-Type", "application/json")
+
+		// Execute the request
+		resp, err := client.Do(req)
+		if err != nil {
+			// If the Sentinel is down, we catch the error but keep the generator running!
+			fmt.Printf("\n[!] Connection Error: Sentinel is unreachable (%s)\n", err.Error())
+			continue
+		}
+
+		// Close the response body to prevent memory leaks (Crucial Go best practice!)
+		if err := resp.Body.Close(); err != nil {
+			fmt.Printf("Error closing response body: %s\n", err)
+		}
+
+		// Print local feedback
+		if currentEvent.Action == "Void" {
+			fmt.Printf("-> Sent Anomaly (Void) to Sentinel. Status: %d\n", resp.StatusCode)
+		} else {
+			fmt.Printf(".")
+		}
 	}
-
-	// 3. Convert our Go struct into a beautifully formatted JSON string (Ticket 2.3)
-	// jsonData, err := json.MarshalIndent(testEvent, "", " ")
-	// if err != nil {
-	// 	fmt.Println("Error generating JSON:", err)
-	// 	return
-	// }
-
-	// 4. Print it to the console
-	// fmt.Println("Simulated POS Event:")
-	// fmt.Println(string(jsonData))
 }
