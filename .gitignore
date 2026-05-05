@@ -3,3 +3,12 @@
 
 # Jetbrains
 .idea/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+*.tfvars
+*.tfvars.json
+*.tfplan
