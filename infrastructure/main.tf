@@ -67,3 +67,64 @@ resource "azurerm_container_registry" "acr" {
   sku                 = "Basic"
   admin_enabled = true
 }
+
+# Log Analytics Workspace / Observability
+resource "azurerm_log_analytics_workspace" "logs" {
+  location            = azurerm_resource_group.rg.location
+  name                = "logs-hospitality-capstone"
+  resource_group_name = azurerm_resource_group.rg.name
+  sku = "PerGB2018"
+  retention_in_days = 30
+}
+
+# Container App Environment / Cluster
+resource "azurerm_container_app_environment" "env" {
+  location                   = azurerm_resource_group.rg.location
+  name                       = "env-hospitality-capstone"
+  resource_group_name        = azurerm_resource_group.rg.name
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.logs.id
+}
+
+# C# Analytics Engine (Container App)
+resource "azurerm_container_app" "analytics" {
+  name                         = "analytics-engine"
+  resource_group_name          = azurerm_resource_group.rg.name
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  revision_mode                = "Single"
+
+  # We configure the ingress to allow internal traffic from the Generator
+  ingress {
+    allow_insecure_connections = false
+    external_enabled = true
+    target_port = 8080
+    traffic_weight {
+      percentage = 100
+      latest_revision = true
+    }
+  }
+
+  # Implementing the Version 2 Secrets Requirement / STRICT COMPLIANCE
+  secret {
+    name = "cosmos-connection-string-v2"
+    # In a fully mature environment, this value pulls from Azure Key Vault targeting the v2 hash.
+    # Here, we directly map the Cosmos DB primary string to the v2 secret definition.
+    value = azurerm_cosmosdb_account.db.primary_sql_connection_string
+  }
+
+  template {
+    container {
+      cpu    = 0.25
+      # For now, we use a placeholder image. In a full CI/CD pipeline,
+      # GitHub Actions would push our compiled C# image to ACR and update this tag.
+      image  = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+      memory = "0.5Gi"
+      name   = "analytics-engine"
+
+      # Passing the Version 2 secret into the container's Environment Variables
+      env {
+        name = "COSMOS_DB_CONNECTION"
+        secret_name = "cosmos-connection-string-v2"
+      }
+    }
+  }
+}
