@@ -3,7 +3,7 @@ terraform {
   required_providers {
     azurerm = {
       source = "hashicorp/azurerm"
-      version = "~> 3.100.0"
+      version = "~> 4.71.0"
     }
   }
 }
@@ -218,3 +218,51 @@ resource "azurerm_container_app" "generator" {
     }
   }
 }
+
+# Active FinOps SRE Bot (CronJob)
+# resource "azurerm_container_app_job" "finops_bot" {
+#   name                         = "finops-bot-job"
+#   container_app_environment_id = azurerm_container_app_environment.env.id
+#   resource_group_name          = azurerm_resource_group.rg.name
+#   location                     = azurerm_resource_group.rg.location
+#
+#   # Fail-safe: If the script gets stuck, Azure will kill it after 60 seconds
+#   replica_timeout_in_seconds = 60
+#   replica_retry_limit        = 1
+#
+#   schedule_trigger_config {
+#     cron_expression = "0 * * * *" # Runs every hour, on the hour
+#     parallelism     = 1           # Ensures only one instance runs at a time
+#   }
+#
+#   registry {
+#     server               = azurerm_container_registry.acr.login_server
+#     username             = azurerm_container_registry.acr.admin_username
+#     password_secret_name = "acr-password"
+#   }
+#
+#   secret {
+#     name  = "acr-password"
+#     value = azurerm_container_registry.acr.admin_password
+#   }
+#
+#   template {
+#     container {
+#       name   = "finops-bot"
+#       image  = "${azurerm_container_registry.acr.login_server}/finops-bot:v1"
+#       cpu    = 0.25
+#       memory = "0.5Gi"
+#
+#       # Passing our configuration into the Go Adapter Factory
+#       env {
+#         name  = "CLOUD_PROVIDER"
+#         value = "azure"
+#       }
+#       # NOTE: In a production pipeline, this ID would be fetched from Azure Key Vault
+#       env {
+#         name  = "AZURE_SUBSCRIPTION_ID"
+#         value = "replace-with-your-real-subscription-id"
+#       }
+#     }
+#   }
+# }
