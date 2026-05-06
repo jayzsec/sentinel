@@ -92,6 +92,11 @@ resource "azurerm_container_app" "analytics" {
   container_app_environment_id = azurerm_container_app_environment.env.id
   revision_mode                = "Single"
 
+  registry {
+    server = azurerm_container_registry.acr.login_server
+    username = azurerm_container_registry.acr.admin_username
+    password_secret_name = "acr-password"
+  }
   # We configure the ingress to allow internal traffic from the Generator
   ingress {
     allow_insecure_connections = false
@@ -110,13 +115,17 @@ resource "azurerm_container_app" "analytics" {
     # Here, we directly map the Cosmos DB primary string to the v2 secret definition.
     value = azurerm_cosmosdb_account.db.primary_sql_connection_string
   }
+  secret {
+    name = "acr-password"
+    value = azurerm_container_registry.acr.admin_password
+  }
 
   template {
     container {
       cpu    = 0.25
       # For now, we use a placeholder image. In a full CI/CD pipeline,
       # GitHub Actions would push our compiled C# image to ACR and update this tag.
-      image  = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+      image  = "${azurerm_container_registry.acr.login_server}/analytics-engine:v1"
       memory = "0.5Gi"
       name   = "analytics-engine"
 
@@ -124,6 +133,87 @@ resource "azurerm_container_app" "analytics" {
       env {
         name = "COSMOS_DB_CONNECTION"
         secret_name = "cosmos-connection-string-v2"
+      }
+    }
+  }
+}
+
+# Go Sentinel SOC (Container App)
+resource "azurerm_container_app" "sentinel" {
+  name                         = "sentinel-soc"
+  resource_group_name          = azurerm_resource_group.rg.name
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  revision_mode                = "Single"
+
+  registry {
+    server = azurerm_container_registry.acr.login_server
+    username = azurerm_container_registry.acr.admin_username
+    password_secret_name = "acr-password"
+  }
+
+  ingress {
+    allow_insecure_connections = false
+    external_enabled = false
+    target_port = 8080
+    traffic_weight {
+      percentage = 100
+      latest_revision = true
+    }
+  }
+
+  secret {
+    name = "acr-password"
+    value = azurerm_container_registry.acr.admin_password
+  }
+
+  template {
+    container {
+      cpu    = 0.25
+      image  = "${azurerm_container_registry.acr.login_server}/sentinel-soc:v1"
+      memory = "0.5Gi"
+      name   = "sentinel-soc"
+
+      env {
+        name  = "ANALYTICS_URL"
+        value = "https://${azurerm_container_app.analytics.ingress[0].fqdn}/ingest"
+      }
+    }
+  }
+}
+
+# Go POS Data Generator (Container App)
+resource "azurerm_container_app" "generator" {
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  name                         = "pos-generator"
+  resource_group_name          = azurerm_resource_group.rg.name
+  revision_mode                = "Single"
+
+  registry {
+    server = azurerm_container_registry.acr.login_server
+    username = azurerm_container_registry.acr.admin_username
+    password_secret_name = "acr-password"
+  }
+
+  secret {
+    name = "acr-password"
+    value = azurerm_container_registry.acr.admin_password
+  }
+
+  template {
+    container {
+      cpu    = 0.25
+      image  = "${azurerm_container_registry.acr.login_server}/pos-generator:v1"
+      memory = "0.5Gi"
+      name   = "pos-generator"
+
+      # Dynamically injecting the internal network URLs of our other services!
+      env {
+        name = "SENTINEL_URL"
+        value = "https://${azurerm_container_app.sentinel.ingress[0].fqdn}/events"
+      }
+      env {
+        name = "ANALYTICS_URL"
+        value = "https://${azurerm_container_app.analytics.ingress[0].fqdn}/ingest"
       }
     }
   }

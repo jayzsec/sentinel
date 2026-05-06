@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -61,6 +63,10 @@ func handleEvent(w http.ResponseWriter, r *http.Request) {
 		fmt.Print(".")
 	}
 
+	// Forward ALL events to the C# Analytics Engine asynchronously
+	// Using a goroutine prevents network latency from slowing down our Go Sentinel
+	go forwardToAnalytics(event)
+
 	// Tell the generator we received it successfully
 	w.WriteHeader(http.StatusOK)
 }
@@ -108,6 +114,46 @@ func executeMitigation(response AIResponse, terminal string) {
 		fmt.Printf("[WARNING] Paging floor manager to review %s.\n", terminal)
 	}
 	fmt.Println("--------------------------------------------------")
+}
+
+// forwardToAnalytics pushes the evaluated event downstream to the C# API
+func forwardToAnalytics(event POSEvent) {
+	analyticsURL := os.Getenv("ANALYTICS_URL")
+	if analyticsURL == "" {
+		fmt.Printf("[ERROR] ANALYTICS_URL is not set. Data dropped.")
+		return
+	}
+
+	// 1. Serialize the event back into JSON
+	payloadBytes, err := json.Marshal(event)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to marshal event for forwarding: %v\n", err)
+		return
+	}
+
+	// 2. Execute the HTTP POST request to the C# container
+	req, err := http.NewRequest("POST", analyticsURL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to create HTTP request: %v\n", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("[ERROR] Network failure forwarding to Analytics Engine: %v\n", err)
+	}
+
+	defer resp.Body.Close()
+
+	// 3. Verify the C# API accepted it
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		fmt.Printf("[->] Successfully forwarded event to Analytics Engine (Status: %d)\n", resp.StatusCode)
+	} else {
+		fmt.Printf("[!] Analytics Engine rejected payload. Status: %d\n", resp.StatusCode)
+	}
+
 }
 
 func main() {
