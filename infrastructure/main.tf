@@ -230,6 +230,11 @@ resource "azurerm_container_app_job" "finops_bot" {
   replica_timeout_in_seconds = 60
   replica_retry_limit        = 1
 
+  # FIX: Enable System-Assigned Managed Identity
+  identity {
+    type = "SystemAssigned"
+  }
+
   schedule_trigger_config {
     cron_expression = "0 * * * *" # Runs every hour, on the hour
     parallelism     = 1           # Ensures only one instance runs at a time
@@ -266,4 +271,20 @@ resource "azurerm_container_app_job" "finops_bot" {
       }
     }
   }
+}
+
+# FIX: Grant the bot permission to read Billing/Cost Data
+# We scope this to the whole subscription so it can read the Cost Management API
+resource "azurerm_role_assignment" "finops_billing_reader" {
+  scope                = "/subscriptions/${var.subscription_id}"
+  role_definition_name = "Cost Management Reader"
+  principal_id         = azurerm_container_app_job.finops_bot.identity[0].principal_id
+}
+
+# FIX: Grant the bot permission to scale down apps
+# We scope this to the Resource Group so it can modify the other container apps
+resource "azurerm_role_assignment" "finops_rg_contributor" {
+  scope                = azurerm_resource_group.rg.id
+  role_definition_name = "Contributor"
+  principal_id         = azurerm_container_app_job.finops_bot.identity[0].principal_id
 }
