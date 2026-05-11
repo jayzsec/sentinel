@@ -2,32 +2,79 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// We need the exact same data contract here to understand the incoming data.
+// POSEvent We need the exact same data contract here to understand the incoming data.
 type POSEvent struct {
-	EventID   string    `json:"event_id"`
-	Terminal  string    `json:"terminal"`
-	StaffRole string    `json:"staff_role"`
-	Action    string    `json:"action"`
-	Amount    float64   `json:"amount"`
-	Timestamp time.Time `json:"timestamp"`
+	EventID       string  `json:"event_id"`
+	VenueID       string  `json:"venue_id"`
+	Timestamp     string  `json:"timestamp"`
+	Terminal      string  `json:"terminal"`
+	Action        string  `json:"action"`
+	Amount        float64 `json:"amount"`
+	ItemID        string  `json:"item_id,omitempty"`
+	StaffID       string  `json:"staff_id"`
+	ManagerID     string  `json:"manager_id,omitempty"`
+	PaymentMethod string  `json:"payment_method,omitempty"`
 }
 
-// This map tracks the total dollar amount of voids per terminal.
-// Moved to global scope for our HTTP handler
-var voidTracker = make(map[string]float64)
+// Global Redis Client
+var rdb *redis.Client
 
 // AIResponse represents the JSON payload we expect back from our LLM.
 type AIResponse struct {
 	Action string `json:"action"` // "alert_manager" or "lockdown"
 	Reason string `json:"reason"`
+}
+
+// initTracer wires up OpenTelemetry to output human-readable traces to the console
+func initTracer() *sdktrace.TracerProvider {
+	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	if err != nil {
+		fmt.Printf("[FATAL] Failed to initialize stdouttrace exporter: %v\n", err)
+		os.Exit(1)
+	}
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter))
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{}) // Crucial for passing trace IDs to C#
+	return tp
+}
+
+func initRedis() {
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+
+	// Configure Redis
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     redisAddr,
+		Password: "",
+		DB:       0,
+	})
+
+	// Test connection
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		fmt.Printf("[FATAL] Could not connect to Redis at %s: %v\n", redisAddr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("[+] Connected to Distributed State Store (Redis) at %s\n", redisAddr)
 }
 
 // This function handles incoming HTTP POST requests
@@ -36,6 +83,13 @@ func handleEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// 1. START OBSERVABILITY TRACE
+	// We extract the context from the incoming HTTP request
+	ctx := r.Context()
+	tracer := otel.Tracer("sentinel-soc")
+	ctx, span := tracer.Start(ctx, "IngestPOSTEvent")
+	defer span.End() // Ensures the span closes and calculates total duration when function exits
 
 	body, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
@@ -50,113 +104,194 @@ func handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Process the event exactly as we did before
-	if event.Action == "Void" {
-		voidTracker[event.Terminal] += event.Amount
-		fmt.Printf("[-] Suspicious Action Tracked: %s logged a $%.2f void on %s.\n", event.StaffRole, event.Amount, event.Terminal)
-		if voidTracker[event.Terminal] >= 200.0 {
-			aiDecision := evaluateThreatWithAI(event, voidTracker[event.Terminal])
-			executeMitigation(aiDecision, event.Terminal)
-			voidTracker[event.Terminal] = 0.0
+	// Tag the span with searchable metadata
+	span.SetAttributes(
+		attribute.String("venue.id", event.VenueID),
+		attribute.String("terminal.id", event.Terminal),
+		attribute.String("event.action", event.Action),
+	)
+
+	//ctx := context.Background()
+
+	// 2. DISTRIBUTED STATE
+	// Create a unique Redis key for this specific terminal at this specific venue
+	redisKey := fmt.Sprintf("timeline:%s:%s", event.VenueID, event.Terminal)
+	eventJSON, _ := json.Marshal(event)
+
+	// Pipeline the commands to save network round trips
+	pipe := rdb.Pipeline()
+	// Note we use the traced 'ctx' here
+	pipe.LPush(ctx, redisKey, eventJSON)
+	pipe.LTrim(ctx, redisKey, 0, 49) // Keep exactly 50 events for the sliding window
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to write state to Redis: %v\n", err)
+	}
+
+	// 3. TRIAGE & COGNITION: Only pull history if the heuristic triggers
+	if event.Action == "Void" && event.Amount >= 50.0 {
+		fmt.Printf("[-] Suspicious Void Detected at %s (%s). Fetching timeline context from Redis...\n", event.VenueID, event.Terminal)
+		// Fetch the full sliding window from Redis
+		rawTimeline, err := rdb.LRange(ctx, redisKey, 0, -1).Result()
+		if err == nil {
+			var currentTimeline []POSEvent
+			// Redis returns lists in reverse order (newest first).
+			// We parse them to feed to the AI.
+			for _, rawEvent := range rawTimeline {
+				var parsed POSEvent
+				json.Unmarshal([]byte(rawEvent), &parsed)
+				currentTimeline = append(currentTimeline, parsed)
+			}
+			// Pass the timeline to the AI (ensure evaluateThreatWithAI accepts []POSEvent)
+			aiDecision := evaluateThreatWithAI(ctx, currentTimeline)
+			executeMitigation(ctx, aiDecision, event)
+		} else {
+			fmt.Printf("[ERROR] Failed to fetch timeline from Redis: %v\n", err)
 		}
-	} else {
-		fmt.Print(".")
 	}
 
 	// Forward ALL events to the C# Analytics Engine asynchronously
 	// Using a goroutine prevents network latency from slowing down our Go Sentinel
-	go forwardToAnalytics(event)
+	go forwardToAnalytics(ctx, event)
 
 	// Tell the generator we received it successfully
 	w.WriteHeader(http.StatusOK)
 }
 
-// --- TICKET 4.4: The Agentic Reasoning ---
 // This function packages the context and "sends" it to the AI.
-func evaluateThreatWithAI(event POSEvent, totalVoided float64) AIResponse {
+func evaluateThreatWithAI(ctx context.Context, timeline []POSEvent) AIResponse {
+	tracer := otel.Tracer("sentinel-soc")
+	_, span := tracer.Start(ctx, "evaluateThreatWithAI")
+	defer span.End()
+
+	span.SetAttributes(attribute.Int("timeline.length", len(timeline)))
+
 	fmt.Println("\n[!] THRESHOLD BREACHED. Contacting AI Agent...")
 
-	// This is the exact prompt we would send to an LLM API (like OpenAI or Ollama)
-	systemPrompt := fmt.Sprintf(`
-		You are an autonomous SOC agent. 
-		Context: Terminal '%s' operated by '%s' just processed a '%s'.
-		Total suspicious activity value on this terminal recently: $%.2f.
-		If this indicates high probability of internal shrinkage (theft), output JSON {"action": "lockdown", "reason": "<your reasoning>"}.
-		Otherwise, output {"action": "alert_manager", "reason": "<your reasoning>"}.`,
-		event.Terminal, event.StaffRole, event.Action, totalVoided)
+	time.Sleep(1 * time.Second) // Simulate network latency
 
-	fmt.Printf(">> SYSTEM PROMPT SENT TO LLM:\n%s\n\n", systemPrompt)
-
-	// To make this runnable today, we simulate the LLM's response.
-	// If it's temporary staff doing huge voids, the AI decides to lock it down.
-	time.Sleep(1 * time.Second) // Simulate network latency to the AI
-
-	if event.StaffRole == "Temporary Seasonal Staff" && totalVoided > 200.0 {
+	if len(timeline) >= 3 {
+		span.SetAttributes(attribute.String("ai.decision", "revoke_pin"))
 		return AIResponse{
-			Action: "lockdown",
-			Reason: "High-value void detected by temporary seasonal staff exceeding safety thresholds. High probability of internal shrinkage.",
+			Action: "revoke_pin",
+			Reason: "Sweethearting pattern detected.",
 		}
 	}
 
+	span.SetAttributes(attribute.String("ai.decision", "alert_manager"))
 	return AIResponse{
 		Action: "alert_manager",
-		Reason: "Void activity is elevated but fits normal parameters for this staff role.",
+		Reason: "Void activity elevated but temporal pattern does not indicate sweethearting.",
 	}
+
+	// Convert the array into a pretty JSON string for the LLM context window
+	//timelineBytes, _ := json.MarshalIndent(timeline, "", " ")
+
+	// This is the exact prompt we would send to an LLM API (like OpenAI or Ollama)
+	//systemPrompt := fmt.Sprintf(`
+	//	You are an autonomous SOC agent.
+	//	Analyze the provided chronological transaction timeline for a specific POS terminal.
+	//	Identify indicators of internal shrinkage, specifically 'sweethearting' (e.g., an order is placed, time passes, a manager voids the item, and the remaining balance is paid in cash).
+	//
+	//	If sweethearting is detected, you MUST output the action "revoke_pin".
+	//	Otherwise, output "alert_manager".
+	//
+	//	Context Timeline:
+	//	%s`, string(timelineBytes))
+	//end systemPrompt
+
+	//fmt.Printf(">> SYSTEM PROMPT SENT TO LLM:\n%s\n\n", systemPrompt)
+
+	// Simulated AI Logic: If we see a timeline with multiple events ending in a void, it flags it.
+	// TODO: fetch to anthropic
 }
 
-// --- TICKET 4.3 & 4.4: The automated response ---
-func executeMitigation(response AIResponse, terminal string) {
-	if response.Action == "lockdown" {
-		fmt.Printf("[CRITICAL ACTION] Executing network isolation for container running %s.\n", terminal)
-		fmt.Printf("[REASON] %s\n", response.Reason)
-		// Here is where you would use Go's os/exec package to run Terraform or Incus commands!
-	} else {
-		fmt.Printf("[WARNING] Paging floor manager to review %s.\n", terminal)
+func executeMitigation(ctx context.Context, response AIResponse, triggerEvent POSEvent) {
+	tracer := otel.Tracer("sentinel-soc")
+	ctx, span := tracer.Start(ctx, "executeMitigation")
+	defer span.End()
+	span.SetAttributes(attribute.String("mitigation.action", response.Action))
+	fmt.Printf("[AGENT] Decision Reached: -> %s\n", response.Action)
+	fmt.Printf("[REASONING] %s\n", response.Reason)
+
+	switch response.Action {
+	case "revoke_pin":
+		fmt.Printf("[CRITICAL ACTION] Sweethearting detected. Revoking POS PIN at %s.\n", triggerEvent.VenueID)
+	case "alert_manager":
+		fmt.Printf("[WARNING] Paging floor manager to review Terminal %s.\n", triggerEvent.Terminal)
 	}
-	fmt.Println("--------------------------------------------------")
 }
 
 // forwardToAnalytics pushes the evaluated event downstream to the C# API
-func forwardToAnalytics(event POSEvent) {
+func forwardToAnalytics(ctx context.Context, event POSEvent) {
+	tracer := otel.Tracer("sentinel-soc")
+	// Use context.Background() as the base here because this is a goroutine that outlives the HTTP request,
+	// but link it to the original trace context.
+	ctx, span := tracer.Start(context.Background(), "ForwardToAnalytics", trace.WithLinks(trace.LinkFromContext(ctx)))
+	defer span.End()
+
 	analyticsURL := os.Getenv("ANALYTICS_URL")
 	if analyticsURL == "" {
 		fmt.Printf("[ERROR] ANALYTICS_URL is not set. Data dropped.")
 		return
 	}
 
-	// 1. Serialize the event back into JSON
+	// Serialize the event back into JSON
 	payloadBytes, err := json.Marshal(event)
 	if err != nil {
 		fmt.Printf("[ERROR] Failed to marshal event for forwarding: %v\n", err)
 		return
 	}
 
-	// 2. Execute the HTTP POST request to the C# container
-	req, err := http.NewRequest("POST", analyticsURL, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		fmt.Printf("[ERROR] Failed to create HTTP request: %v\n", err)
-		return
+	maxRetries := 4
+	baseDelay := 1 * time.Second
+
+	// The Exponential Backoff Loop
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", analyticsURL, bytes.NewBuffer(payloadBytes))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Do(req)
+
+			// If the network call succeeded AND the C# API accepted it
+			if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				resp.Body.Close()
+				// Success! Exit the function.
+				return
+			}
+
+			// If we got a response but it was a 5xx Server Error, close the body to prevent memory leaks
+			if resp != nil {
+				resp.Body.Close()
+			}
+		}
+
+		// If we reached the max retries, give up to prevent hanging the system forever
+		if attempt == maxRetries {
+			fmt.Printf("[FATAL] Analytics Engine unreachable after %d attempts. Payload dropped: %s\n", maxRetries, event.EventID)
+			return
+		}
+
+		// Calculate the backoff delay: 1s, 2s, 4s, 8s...
+		delay := baseDelay * time.Duration(1<<attempt)
+		fmt.Printf("[WARNING] Analytics Engine unreachable. Retrying in %v (Attempt %d/%d)...\n", delay, attempt+1, maxRetries)
+		time.Sleep(delay)
 	}
-
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("[ERROR] Network failure forwarding to Analytics Engine: %v\n", err)
-	}
-
-	defer resp.Body.Close()
-
-	// 3. Verify the C# API accepted it
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		fmt.Printf("[->] Successfully forwarded event to Analytics Engine (Status: %d)\n", resp.StatusCode)
-	} else {
-		fmt.Printf("[!] Analytics Engine rejected payload. Status: %d\n", resp.StatusCode)
-	}
-
 }
 
 func main() {
+	//Initialise Otel Tracer
+	tp := initTracer()
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			fmt.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
+
+	// Initialise our Redis connection before starting the HTTP server
+	initRedis()
+	fmt.Println("Redis Engine initiated.")
 	fmt.Println("Sentinel SOC Engine Online.")
 	fmt.Println("Listening for HTTP POST requests on port 8080...")
 

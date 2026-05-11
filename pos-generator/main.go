@@ -8,73 +8,140 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // POSEvent represents a single action taken on a POS terminal
 type POSEvent struct {
-	EventID   string    `json:"event_id"`
-	Terminal  string    `json:"terminal"`
-	StaffRole string    `json:"staff_role"`
-	Action    string    `json:"action"`
-	Amount    float64   `json:"amount"`
-	Timestamp time.Time `json:"timestamp"`
+	EventID       string  `json:"event_id"`
+	VenueID       string  `json:"venue_id"`
+	Terminal      string  `json:"terminal"`
+	StaffRole     string  `json:"staff_role"`
+	Action        string  `json:"action"`
+	Amount        float64 `json:"amount"`
+	ItemID        string  `json:"item_id,omitempty"`
+	StaffID       string  `json:"staff_id"`
+	ManagerID     string  `json:"manager_id,omitempty"`
+	PaymentMethod string  `json:"payment_method,omitempty"`
+	Timestamp     string  `json:"timestamp"`
 }
 
-// --- TICKET 2.1: The Dictionaries ---
-// We define these as global slices so our generator can pick from them quickly.
+// Global dictionaries
 var terminals = []string{"Front Bar 1", "Front Bar 2", "Dining Room POS", "Patio Mobile"}
 var staffRoles = []string{"Manager", "Bartender", "Server", "Temporary Seasonal Staff"}
 var normalActions = []string{"Order", "Payment"}
+var venues = []string{"V-Brisbane-CBD", "V-GoldCoast", "V-SunshineCoast"}
 
-// --- TICKET 2.2: The Generator Function ---
 // generateNormalEvent creates a perfectly healthy, standard restaurant transaction.
-func generateNormalEvent(rng *rand.Rand) POSEvent {
-	// Pick random indexes from our dictionaries
+func generateNormalEvent(rng *rand.Rand, venueID string) POSEvent {
 	randomTerminal := terminals[rng.IntN(len(terminals))]
 	randomRole := staffRoles[rng.IntN(len(staffRoles))]
 	randomAction := normalActions[rng.IntN(len(normalActions))]
-
-	// Generate a random amount between $5.00 and $155.00 for normal orders
 	randomAmount := 5.0 + (rng.Float64() * 150.0)
 
 	return POSEvent{
-		EventID:   fmt.Sprintf("EVT-%d", rng.IntN(1000000)), // Fake random ID
+		EventID:   uuid.NewString(),
+		VenueID:   venueID,
 		Terminal:  randomTerminal,
 		StaffRole: randomRole,
 		Action:    randomAction,
 		Amount:    randomAmount,
-		Timestamp: time.Now(),
+		Timestamp: time.Now().Format(time.RFC3339),
 	}
 }
 
-// --- TICKET 3.1: The Threat Injector ---
-// generateAnomalousEvent creates a highly suspicious transaction for our AI to catch.
-func generateAnomalousEvent(rng *rand.Rand) POSEvent {
-	// Anomalies often happen at less supervised terminals
-	suspiciousTerminal := "Patio Mobile"
+// simulateSweethearting returns a chronological array of events representing theft.
+func simulateSweetHearting(venueID string) []POSEvent {
+	var timeline []POSEvent
 
-	// We simulate a compromised account or insider threat
-	vulnerableRole := "Temporary Seasonal Staff"
+	terminal := "main-bar-register"
+	staffID := "s-12"
+	managerID := "m-402"
+	itemID := "item-ribeye-01"
 
-	// The malicious action
-	suspiciousAction := "Void"
+	// We simulate this table starting their meal exactly one hour ago
+	baseTime := time.Now().Add(-1 * time.Hour)
 
-	// High dollar amount to trigger the agent's threshold quickly ($200 to $500)
-	suspiciousAmount := 200.0 + (rng.Float64() * 300.0)
+	// T+0: Initial Order
+	timeline = append(timeline, POSEvent{
+		EventID:   uuid.NewString(),
+		VenueID:   venueID,
+		Timestamp: baseTime.Format(time.RFC3339),
+		Terminal:  terminal,
+		Action:    "Order",
+		Amount:    65.00,
+		ItemID:    itemID,
+		StaffID:   staffID,
+	})
 
-	return POSEvent{
-		EventID:   fmt.Sprintf("EVT-CRIT-%d", rng.IntN(1000000)), // Tagging ID for easier debugging
-		Terminal:  suspiciousTerminal,
-		StaffRole: vulnerableRole,
-		Action:    suspiciousAction,
-		Amount:    suspiciousAmount,
-		Timestamp: time.Now(),
+	// T+45 mins: Ordering drinks (Adding noise to make the timeline look like a real table)
+	timeline = append(timeline, POSEvent{
+		EventID:   uuid.NewString(),
+		VenueID:   venueID,
+		Timestamp: baseTime.Add(45 * time.Minute).Format(time.RFC3339),
+		Terminal:  terminal,
+		Action:    "Order",
+		Amount:    20.00,
+		ItemID:    "ITEM-BEER-02",
+		StaffID:   staffID,
+	})
+
+	// T+46 mins: The Malicious Void by the Manager (The theft)
+	timeline = append(timeline, POSEvent{
+		EventID:   uuid.NewString(),
+		VenueID:   venueID,
+		Timestamp: baseTime.Add(46 * time.Minute).Format(time.RFC3339),
+		Terminal:  terminal,
+		Action:    "Void",
+		Amount:    65.00,
+		ItemID:    itemID,
+		StaffID:   staffID,
+		ManagerID: managerID, // Manager PIN used to authorize the void
+	})
+
+	// T+47 mins: The Settlement (The getaway)
+	timeline = append(timeline, POSEvent{
+		EventID:       uuid.NewString(),
+		VenueID:       venueID,
+		Timestamp:     baseTime.Add(47 * time.Minute).Format(time.RFC3339),
+		Terminal:      terminal,
+		Action:        "Payment",
+		Amount:        20.00, // Only paying for the beers
+		StaffID:       staffID,
+		PaymentMethod: "Cash", // Cash is untraceable, completing the sweethearting profile
+	})
+
+	return timeline
+}
+
+// transmitEvent handles the JSON marshaling and HTTP POST to the Sentinel
+func transmitEvent(client *http.Client, targetURL string, event POSEvent) {
+	jsonData, err := json.Marshal(event)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to marshal JSON: %v\n", err)
+		return
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, targetURL, bytes.NewBuffer(jsonData))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("[ERROR] Network failure reaching Sentinel: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if event.Action == "Void" {
+		fmt.Printf("-> Broadcasted Anomaly (Void) to network for Venue: %s\n", event.VenueID)
+	} else {
+		fmt.Print(".")
 	}
 }
 
 func main() {
-	// 1. Initialize our random number generator with the current time
-	// This ensures we get different results every time we run the program.
+	// Initialise randomiser
 	seed := uint64(time.Now().UnixNano())
 	rng := rand.New(rand.NewPCG(seed, seed))
 
@@ -94,8 +161,8 @@ func main() {
 	fmt.Printf("Transmitting live data to Sentinel at: %s\n", sentinelURL)
 	fmt.Println("Press Ctrl+C to stop.")
 
-	// Create a ticker that fires every 2 seconds to simulate busy traffic
-	ticker := time.NewTicker(2 * time.Second)
+	// Create a ticker that fires every 5 seconds to simulate busy traffic
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop() // Good practice to clean up resources
 
 	// We create a reusable HTTP client. It's a best practice to set a timeout
@@ -107,69 +174,44 @@ func main() {
 	// Start an infinite loop to listen to the ticker
 	for {
 		<-ticker.C // Block until the ticker fires
-		var currentEvent POSEvent
 
-		// 15% chance to generate a suspicious anomaly
-		if rng.Float64() < 0.15 {
-			currentEvent = generateAnomalousEvent(rng)
+		currentVenue := venues[rng.IntN(len(venues))]
+		isMalicious := rng.Float32() < 0.05 // Fixed: < 0.05 correctly yields a 5% chance
+
+		if isMalicious {
+			// Generate the Sweetheart Timeline
+			fmt.Printf("[!] Initiating Sweethearting Simulation at %s...\n", currentVenue)
+			maliciousTimeline := simulateSweetHearting(currentVenue)
+
+			// Safely transmit the entire array sequentially inside the loop
+			for _, event := range maliciousTimeline {
+				transmitEvent(client, sentinelURL, event)
+				time.Sleep(500 * time.Millisecond) // Ensure chronological ingestion
+			}
 		} else {
-			currentEvent = generateNormalEvent(rng)
+			// Generate and immediately transmit a normal transaction
+			normalEvent := generateNormalEvent(rng, currentVenue)
+			transmitEvent(client, sentinelURL, normalEvent)
 		}
-
-		// Convert our struct to JSON
-		jsonData, err := json.Marshal(currentEvent)
-		if err != nil {
-			fmt.Printf("Error generating JSON: %s\n", err)
-			continue
-		}
-
 		// Send the HTTP POST request to the Sentinel
 		// Update - Fire to Sentinel in a concurrent Goroutine
-		go func() {
-			req, _ := http.NewRequest(http.MethodPost, sentinelURL, bytes.NewBuffer(jsonData))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
-			if err == nil {
-				resp.Body.Close()
-			}
-		}()
-
-		// Fire to Analytics Engine in a concurrent Goroutine
-		go func() {
-			req, _ := http.NewRequest(http.MethodPost, analyticsURL, bytes.NewBuffer(jsonData))
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := client.Do(req)
-			if err == nil {
-				resp.Body.Close()
-			}
-		}()
-
-		//req, err := http.NewRequest(http.MethodPost, sentinelURL, bytes.NewBuffer(jsonData))
-		//if err != nil {
-		//	fmt.Printf("Error creating request: %s\n", err)
-		//	continue
-		//}
-		//// Tell the Sentinel we are sending JSON data
-		//req.Header.Set("Content-Type", "application/json")
+		//go func() {
+		//	req, _ := http.NewRequest(http.MethodPost, sentinelURL, bytes.NewBuffer(jsonData))
+		//	req.Header.Set("Content-Type", "application/json")
+		//	resp, err := client.Do(req)
+		//	if err == nil {
+		//		resp.Body.Close()
+		//	}
+		//}()
 		//
-		//// Execute the request
-		//resp, err := client.Do(req)
-		//if err != nil {
-		//	// If the Sentinel is down, we catch the error but keep the generator running!
-		//	fmt.Printf("\n[!] Connection Error: Sentinel is unreachable (%s)\n", err.Error())
-		//	continue
-		//}
-		//
-		//// Close the response body to prevent memory leaks (Crucial Go best practice!)
-		//if err := resp.Body.Close(); err != nil {
-		//	fmt.Printf("Error closing response body: %s\n", err)
-		//}
-
-		// Print local feedback
-		if currentEvent.Action == "Void" {
-			fmt.Println("-> Broadcasted Anomaly (Void) to network.")
-		} else {
-			fmt.Printf(".")
-		}
+		//// Fire to Analytics Engine in a concurrent Goroutine
+		//go func() {
+		//	req, _ := http.NewRequest(http.MethodPost, analyticsURL, bytes.NewBuffer(jsonData))
+		//	req.Header.Set("Content-Type", "application/json")
+		//	resp, err := client.Do(req)
+		//	if err == nil {
+		//		resp.Body.Close()
+		//	}
+		//}()
 	}
 }
