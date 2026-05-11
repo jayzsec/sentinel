@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentinel SOC | Live Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; margin-bottom: 2rem; }
+        .header h1 { margin: 0; color: #38bdf8; font-size: 1.5rem; letter-spacing: 1px; text-transform: uppercase; }
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem; }
+        .stat-card { background: #1e293b; padding: 1.5rem; border-radius: 8px; border-top: 4px solid #38bdf8; }
+        .stat-card.alert { border-top-color: #ef4444; }
+        .stat-title { font-size: 0.875rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.5rem; }
+        .stat-value { font-size: 2rem; font-weight: bold; margin: 0; }
+        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 1rem; text-align: left; border-bottom: 1px solid #334155; }
+        th { background: #0f172a; color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px; }
+        tr:hover { background: #334155; }
+        .badge { padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; }
+        .badge-order { background: #0ea5e9; color: #fff; }
+        .badge-void { background: #ef4444; color: #fff; animation: pulse 2s infinite; }
+        .badge-payment { background: #10b981; color: #fff; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        select { background: #1e293b; color: #fff; border: 1px solid #334155; padding: 0.5rem; border-radius: 4px; outline: none; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Sentinel SOC | Anomaly Detection</h1>
+    <select id="venueSelect" onchange="fetchData()">
+        <option value="V-Brisbane-CBD">Brisbane CBD</option>
+        <option value="V-GoldCoast" selected>Gold Coast</option>
+        <option value="V-SunshineCoast">Sunshine Coast</option>
+    </select>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-title">Total Transactions Analyzed</div>
+        <div class="stat-value" id="totalEvents">0</div>
+    </div>
+    <div class="stat-card alert">
+        <div class="stat-title">Confirmed Shrinkage (Theft)</div>
+        <div class="stat-value" id="totalStolen">$0.00</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-title">System Status</div>
+        <div class="stat-value" style="color: #10b981; font-size: 1.5rem;">AI ACTIVE</div>
+    </div>
+</div>
+
+<table>
+    <thead>
+    <tr>
+        <th>Timestamp</th>
+        <th>Terminal</th>
+        <th>Staff ID</th>
+        <th>Action</th>
+        <th>Amount</th>
+        <th>Manager Auth</th>
+    </tr>
+    </thead>
+    <tbody id="eventTableBody">
+    </tbody>
+</table>
+
+<script>
+    async function fetchData() {
+        const venue = document.getElementById('venueSelect').value;
+        try {
+            const response = await fetch(`/dashboard/${venue}`);
+            const data = await response.json();
+
+            document.getElementById('totalEvents').innerText = data.length;
+
+            let stolenAmount = 0;
+            let tableHTML = '';
+
+            data.forEach(event => {
+                // Format Timestamp
+                const timeString = new Date(event.timestamp).toLocaleTimeString();
+
+                // Determine Badge Color
+                let badgeClass = 'badge-order';
+                if (event.action === 'Void') {
+                    badgeClass = 'badge-void';
+                    stolenAmount += event.amount; // Tally the stolen money
+                } else if (event.action === 'Payment') {
+                    badgeClass = 'badge-payment';
+                }
+
+                tableHTML += `
+                        <tr>
+                            <td style="color: #94a3b8;">${timeString}</td>
+                            <td>${event.terminal}</td>
+                            <td>${event.staff_id}</td>
+                            <td><span class="badge ${badgeClass}">${event.action}</span></td>
+                            <td style="font-family: monospace; font-size: 1.1rem;">$${event.amount.toFixed(2)}</td>
+                            <td style="color: #ef4444;">${event.manager_id || '--'}</td>
+                        </tr>
+                    `;
+            });
+
+            document.getElementById('eventTableBody').innerHTML = tableHTML;
+            document.getElementById('totalStolen').innerText = `$${stolenAmount.toFixed(2)}`;
+
+        } catch (error) {
+            console.error("Failed to fetch data:", error);
+            document.getElementById('eventTableBody').innerHTML = `<tr><td colspan="6" style="color: #ef4444; text-align: center;">Connection to Analytics Engine lost.</td></tr>`;
+        }
+    }
+
+    // Fetch immediately on load, and then refresh every 3 seconds to create a live dashboard effect
+    fetchData();
+    setInterval(fetchData, 3000);
+</script>
+</body>
+</html>

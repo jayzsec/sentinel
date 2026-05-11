@@ -1,72 +1,141 @@
-using Scalar.AspNetCore;
-using System.Collections.Concurrent;
-using AnalyticsEngine.Models;
-using Microsoft.AspNetCore.Mvc;
+using Microsoft.Azure.Cosmos;
+using System.Text.Json.Serialization;
+using Newtonsoft.Json;
+using System.Net;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddOpenApi();
+// 1. COSMOS DB CONFIGURATION
+// In a production environment, these would be pulled from Azure Key Vault or Environment Variables.
+string endpointUri = builder.Configuration["CosmosDb:EndpointUri"] ?? Environment.GetEnvironmentVariable("COSMOS_ENDPOINT") ?? throw new InvalidOperationException("Cosmos Endpoint missing");
+string primaryKey = builder.Configuration["CosmosDb:PrimaryKey"] ?? Environment.GetEnvironmentVariable("COSMOS_KEY") ?? throw new InvalidOperationException("Cosmos Key missing");
+string databaseId = "SentinelDB";
+string containerId = "POSEvents";
+
+// 2. DEPENDENCY INJECTION
+// We register the Cosmos DB Container as a Singleton so we don't exhaust SNAT ports by creating a new client per request.
+builder.Services.AddSingleton<Container>(sp =>
+{
+    CosmosClient cosmosClient = new CosmosClient(endpointUri, primaryKey, new CosmosClientOptions()
+    {
+        SerializerOptions = new CosmosSerializationOptions()
+        {
+            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase
+        }
+    });
+    
+    // Auto-create the database and container if they don't exist (Great for dev environments)
+    Database database = cosmosClient.CreateDatabaseIfNotExistsAsync(databaseId).GetAwaiter().GetResult();
+    return database.CreateContainerIfNotExistsAsync(containerId, "/venue_id").GetAwaiter().GetResult();
+});
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+// 3. THE INGESTION ENDPOINT (Called by the Go Sentinel)
+app.MapPost("/ingest", async (POSEvent incomingEvent, Container container) =>
 {
-    app.MapOpenApi();
-    app.MapScalarApiReference();
-}
-
-// This thread-safe dictionary tracks live stats for each terminal
-var terminalStats = new ConcurrentDictionary<string, TerminalMetrics>();
-
-app.UseHttpsRedirection();
-
-// 1. The INGEST Endpoint (Where Go sends the data)
-app.MapPost("/ingest", ([FromBody] POSEvent posEvent) =>
-{
-    // Get the current stats for this terminal, or create a new entry if it's the first time we've seen it
-    var stats = terminalStats.GetOrAdd(posEvent.Terminal, new TerminalMetrics());
-
-    // Update our numbers based on the action
-    stats.TotalTransactions++;
-
-    if (posEvent.Action == "Void")
+    try
     {
-        stats.TotalVoids += posEvent.Amount;
-    }
-    else if (posEvent.Action == "Payment" || posEvent.Action == "Order")
-    {
-        stats.TotalRevenue += posEvent.Amount;
-    }
+        // Write the document to Cosmos DB, physically partitioning it by VenueID for maximum performance.
+        await container.CreateItemAsync(
+            item: incomingEvent,
+            partitionKey: new PartitionKey(incomingEvent.VenueID)
+        );
 
-    return Results.Ok(new { status = "Ingested", eventId = posEvent.EventID });
+        Console.WriteLine($"[+] Persisted Event {incomingEvent.EventID} to Cosmos DB ({incomingEvent.VenueID}).");
+        return Results.Ok(new { status = "persisted", id = incomingEvent.EventID });
+    }
+    catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
+    {
+        // Exponential Backoff might send the same event twice. We safely ignore duplicates.
+        Console.WriteLine($"[-] Event {incomingEvent.EventID} already exists. Ignoring duplicate.");
+        return Results.Ok(); 
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[FATAL] Database write failed: {ex.Message}");
+        return Results.Problem("Failed to write to database.", statusCode: 500);
+    }
 });
 
-// 2. The DASHBOARD Endpoint (Where the Manager views the data)
-app.MapGet("/dashboard", () =>
+// 4. THE DASHBOARD ENDPOINT (Called by Power BI)
+app.MapGet("/dashboard/{venueId}", async (string venueId, Container container) =>
 {
-    // LINQ (Language Integrated Query) makes calculating venue-wide totals incredibly easy
-    var venueTotalRevenue = terminalStats.Values.Sum(t => t.TotalRevenue);
-    var venueTotalVoids = terminalStats.Values.Sum(t => t.TotalVoids);
+    Console.WriteLine($"[i] Power BI requested dashboard data for Venue: {venueId}");
+    
+    // Define the SQL query scoped strictly to the partition key
+    var sqlQueryText = "SELECT * FROM c WHERE c.venue_id = @venueId ORDER BY c.timestamp DESC OFFSET 0 LIMIT 100";
+    
+    var queryDefinition = new QueryDefinition(sqlQueryText)
+        .WithParameter("@venueId", venueId);
 
-    // Return a rich JSON object for the front-end dashboard
-    return Results.Ok(new
+    using var queryResultSetIterator = container.GetItemQueryIterator<POSEvent>(
+        queryDefinition,
+        requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey(venueId) }
+    );
+
+    var events = new List<POSEvent>();
+
+    while (queryResultSetIterator.HasMoreResults)
     {
-        VenueTotalRevenue = venueTotalRevenue,
-        VenueTotalVoids = venueTotalVoids,
-        ActiveTerminal = terminalStats.Count,
-        TerminalBreakdown = terminalStats
-    });
+        var currentResultSet = await queryResultSetIterator.ReadNextAsync();
+        foreach (var posEvent in currentResultSet)
+        {
+            events.Add(posEvent);
+        }
+    }
+
+    return Results.Ok(events);
 });
+
+// Add this right above app.Run();
+app.UseDefaultFiles(); // Tells .NET to look for index.html
+app.UseStaticFiles();  // Enables serving HTML, CSS, and JS files
 
 app.Run();
 
-// --- Helper Class for tracking metrics ---
-public class TerminalMetrics
+// 5. THE DATA MODEL
+public class POSEvent
 {
-    public int TotalTransactions { get; set; } = 0;
-    public double TotalRevenue { get; set; } = 0;
-    public double TotalVoids { get; set; } = 0;
+    // The Web API catches "event_id" from Go. Cosmos DB saves it as "id".
+    [JsonPropertyName("event_id")] 
+    [JsonProperty("id")] 
+    public string EventID { get; set; } = string.Empty;
+
+    // From here down, both serializers use the exact same snake_case names.
+    [JsonPropertyName("venue_id")]
+    [JsonProperty("venue_id")]
+    public string VenueID { get; set; } = string.Empty;
+
+    [JsonPropertyName("timestamp")]
+    [JsonProperty("timestamp")]
+    public string Timestamp { get; set; } = string.Empty;
+
+    [JsonPropertyName("terminal")]
+    [JsonProperty("terminal")]
+    public string Terminal { get; set; } = string.Empty;
+
+    [JsonPropertyName("action")]
+    [JsonProperty("action")]
+    public string Action { get; set; } = string.Empty;
+
+    [JsonPropertyName("amount")]
+    [JsonProperty("amount")]
+    public double Amount { get; set; }
+
+    [JsonPropertyName("item_id")]
+    [JsonProperty("item_id")]
+    public string? ItemID { get; set; }
+
+    [JsonPropertyName("staff_id")]
+    [JsonProperty("staff_id")]
+    public string StaffID { get; set; } = string.Empty;
+
+    [JsonPropertyName("manager_id")]
+    [JsonProperty("manager_id")]
+    public string? ManagerID { get; set; }
+
+    [JsonPropertyName("payment_method")]
+    [JsonProperty("payment_method")]
+    public string? PaymentMethod { get; set; }
 }
