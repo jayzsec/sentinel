@@ -3,19 +3,23 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -42,14 +46,40 @@ type AIResponse struct {
 	Reason string `json:"reason"`
 }
 
-// initTracer wires up OpenTelemetry to output human-readable traces to the console
+// initTracer wires up OpenTelemetry to export traces via HTTP OTLP
 func initTracer() *sdktrace.TracerProvider {
-	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	ctx := context.Background()
+	// 1. Configure the OTLP Exporter
+	// This takes the traces and fires them over the network instead of printing them to the console.
+	// We allow the endpoint to be injected via environment variables for cloud deployment.
+
+	exporter, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithInsecure(), // Used for internal cluster routing
+	)
 	if err != nil {
-		fmt.Printf("[FATAL] Failed to initialize stdouttrace exporter: %v\n", err)
+		fmt.Printf("[FATAL] Failed to initialize OTLP exporter: %v\n", err)
 		os.Exit(1)
 	}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter))
+
+	// 2. Define the Resource Attributes
+	// This tells the observability dashboard exactly WHICH microservice generated the trace.
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceName("sentinel-soc"),
+			semconv.ServiceVersion("1.0.0"),
+		),
+	)
+	if err != nil {
+		fmt.Printf("[FATAL] Failed to create resource: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 3. Register the Provider
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{}) // Crucial for passing trace IDs to C#
 	return tp
@@ -61,12 +91,23 @@ func initRedis() {
 		redisAddr = "localhost:6379"
 	}
 
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+
 	// Configure Redis
-	rdb = redis.NewClient(&redis.Options{
+	options := &redis.Options{
 		Addr:     redisAddr,
-		Password: "",
+		Password: redisPassword,
 		DB:       0,
-	})
+	}
+
+	// AZURE FIX: If connecting to Azure Redis (port 6380), we MUST enable TLS
+	if strings.HasSuffix(redisAddr, "6380") {
+		options.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
+	rdb = redis.NewClient(options)
 
 	// Test connection
 	if err := rdb.Ping(context.Background()).Err(); err != nil {

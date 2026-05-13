@@ -2,7 +2,7 @@
 FROM golang:1.26.2-alpine AS builder
 LABEL authors="jayzsec"
 WORKDIR /app
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY main.go ./
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sentinel-soc .
 
