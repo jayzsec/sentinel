@@ -120,12 +120,17 @@ resource "azurerm_container_app" "analytics" {
     value = azurerm_container_registry.acr.admin_password
   }
 
+  secret {
+    name  = "cosmos-key" # This is the internal reference name
+    value = azurerm_cosmosdb_account.db.primary_key
+  }
+
   template {
     container {
       cpu    = 0.25
       # For now, we use a placeholder image. In a full CI/CD pipeline,
       # GitHub Actions would push our compiled C# image to ACR and update this tag.
-      image  = "${azurerm_container_registry.acr.login_server}/analytics-engine:v1"
+      image  = "${azurerm_container_registry.acr.login_server}/analytics-engine:v3"
       memory = "0.5Gi"
       name   = "analytics-engine"
 
@@ -134,8 +139,38 @@ resource "azurerm_container_app" "analytics" {
         name = "COSMOS_DB_CONNECTION"
         secret_name = "cosmos-connection-string-v2"
       }
+      env {
+        name = "COSMOS_ENDPOINT"
+        value = azurerm_cosmosdb_account.db.endpoint
+      }
+      env {
+        name = "COSMOS_KEY"
+        secret_name = "cosmos-key"
+      }
+      env {
+        name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        value = azurerm_application_insights.appinsights.connection_string
+      }
     }
   }
+}
+
+# REDIS Distributed State Store
+resource "azurerm_redis_cache" "redis" {
+  name                = "redis-sentinel-soc-${random_string.suffix.result}"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  capacity            = 0
+  family              = "C"
+  sku_name            = "Basic"
+  minimum_tls_version = "1.2"
+}
+
+# Required to ensure the Redis name is globally unique
+resource "random_string" "suffix" {
+  length  = 6
+  special = false
+  upper   = false
 }
 
 # Go Sentinel SOC (Container App)
@@ -166,16 +201,36 @@ resource "azurerm_container_app" "sentinel" {
     value = azurerm_container_registry.acr.admin_password
   }
 
+  secret {
+    name  = "redis-password"
+    value = azurerm_redis_cache.redis.primary_access_key
+  }
+
   template {
     container {
       cpu    = 0.25
-      image  = "${azurerm_container_registry.acr.login_server}/sentinel-soc:v1"
+      image  = "${azurerm_container_registry.acr.login_server}/sentinel-soc:v5"
       memory = "0.5Gi"
       name   = "sentinel-soc"
 
       env {
         name  = "ANALYTICS_URL"
         value = "https://${azurerm_container_app.analytics.ingress[0].fqdn}/ingest"
+      }
+
+      # Redis update
+      env {
+        name  = "REDIS_ADDR"
+        # Azure Redis uses port 6380 for SSL connections
+        value = "${azurerm_redis_cache.redis.hostname}:6380"
+      }
+      env {
+        name        = "REDIS_PASSWORD"
+        secret_name = "redis-password"
+      }
+      env {
+        name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        value = azurerm_application_insights.appinsights.connection_string
       }
     }
   }
@@ -202,7 +257,7 @@ resource "azurerm_container_app" "generator" {
   template {
     container {
       cpu    = 0.25
-      image  = "${azurerm_container_registry.acr.login_server}/pos-generator:v1"
+      image  = "${azurerm_container_registry.acr.login_server}/pos-generator:v3"
       memory = "0.5Gi"
       name   = "pos-generator"
 
@@ -214,6 +269,10 @@ resource "azurerm_container_app" "generator" {
       env {
         name = "ANALYTICS_URL"
         value = "https://${azurerm_container_app.analytics.ingress[0].fqdn}/ingest"
+      }
+      env {
+        name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        value = azurerm_application_insights.appinsights.connection_string
       }
     }
   }
@@ -254,7 +313,7 @@ resource "azurerm_container_app_job" "finops_bot" {
   template {
     container {
       name   = "finops-bot"
-      image  = "${azurerm_container_registry.acr.login_server}/finops-bot:v1"
+      image  = "${azurerm_container_registry.acr.login_server}/finops-bot:v2"
       cpu    = 0.25
       memory = "0.5Gi"
 
@@ -287,4 +346,22 @@ resource "azurerm_role_assignment" "finops_rg_contributor" {
   scope                = azurerm_resource_group.rg.id
   role_definition_name = "Contributor"
   principal_id         = azurerm_container_app_job.finops_bot.identity[0].principal_id
+}
+
+# Log Analytics Workspace (The storage engine)
+resource "azurerm_log_analytics_workspace" "law" {
+  name                = "law-sentinel-soc"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+}
+
+# Application Insights (The Single Pane of Glass)
+resource "azurerm_application_insights" "appinsights" {
+  name                = "appinsights-sentinel-soc"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  workspace_id        = azurerm_log_analytics_workspace.law.id
+  application_type    = "web"
 }
