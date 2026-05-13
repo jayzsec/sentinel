@@ -104,9 +104,14 @@ func (a *AzureProvider) ScaleToZero(ctx context.Context, resourceGroup string, t
 			continue
 		}
 
+		// FIX: Explicitly nullify the secrets array so Azure ignores it during the update
+		if app.Properties != nil && app.Properties.Configuration != nil {
+			app.Properties.Configuration.Secrets = nil
+		}
+
 		// 2. Modify the template to force Min and Max replicas to 0
 		app.Properties.Template.Scale.MinReplicas = to.Ptr[int32](0)
-		app.Properties.Template.Scale.MaxReplicas = to.Ptr[int32](0)
+		app.Properties.Template.Scale.MaxReplicas = to.Ptr[int32](1)
 
 		// 3. Push the update back to Azure
 		poller, err := client.BeginUpdate(ctx, resourceGroup, appName, app.ContainerApp, nil)
