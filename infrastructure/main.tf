@@ -209,7 +209,7 @@ resource "azurerm_container_app" "sentinel" {
   template {
     container {
       cpu    = 0.25
-      image  = "${azurerm_container_registry.acr.login_server}/sentinel-soc:v5"
+      image  = "${azurerm_container_registry.acr.login_server}/sentinel-soc:v6"
       memory = "0.5Gi"
       name   = "sentinel-soc"
 
@@ -257,7 +257,7 @@ resource "azurerm_container_app" "generator" {
   template {
     container {
       cpu    = 0.25
-      image  = "${azurerm_container_registry.acr.login_server}/pos-generator:v3"
+      image  = "${azurerm_container_registry.acr.login_server}/pos-generator:v4"
       memory = "0.5Gi"
       name   = "pos-generator"
 

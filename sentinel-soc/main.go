@@ -15,7 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -53,8 +53,10 @@ func initTracer() *sdktrace.TracerProvider {
 	// This takes the traces and fires them over the network instead of printing them to the console.
 	// We allow the endpoint to be injected via environment variables for cloud deployment.
 
-	exporter, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithInsecure(), // Used for internal cluster routing
+	// Fix: Appsotlptracehttp to otlptracegrpc
+	// Port 4317 is the industry standard port for OpenTelemetry over gRPC, previous we are using Port 4318 which is the standard port for OpenTelemetry over HTTP
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithInsecure(), // Used for internal cluster routing
 	)
 	if err != nil {
 		fmt.Printf("[FATAL] Failed to initialize OTLP exporter: %v\n", err)

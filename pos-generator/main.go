@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -43,8 +43,10 @@ var venues = []string{"V-Brisbane-CBD", "V-GoldCoast", "V-SunshineCoast"}
 func initTracer() *sdktrace.TracerProvider {
 	ctx := context.Background()
 
-	exporter, err := otlptracehttp.New(ctx,
-		otlptracehttp.WithInsecure(),
+	// Fix: Appsotlptracehttp to otlptracegrpc
+	// Port 4317 is the industry standard port for OpenTelemetry over gRPC
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithInsecure(),
 	)
 	if err != nil {
 		fmt.Printf("[FATAL] Failed to initialize OTLP exporter: %v\n", err)
