@@ -2,15 +2,31 @@ using Microsoft.Azure.Cosmos;
 using System.Text.Json.Serialization;
 using Newtonsoft.Json;
 using System.Net;
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // 1. COSMOS DB CONFIGURATION
 // In a production environment, these would be pulled from Azure Key Vault or Environment Variables.
+string appInsightsString = Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING") ?? string.Empty;
 string endpointUri = builder.Configuration["CosmosDb:EndpointUri"] ?? Environment.GetEnvironmentVariable("COSMOS_ENDPOINT") ?? throw new InvalidOperationException("Cosmos Endpoint missing");
 string primaryKey = builder.Configuration["CosmosDb:PrimaryKey"] ?? Environment.GetEnvironmentVariable("COSMOS_KEY") ?? throw new InvalidOperationException("Cosmos Key missing");
 string databaseId = "SentinelDB";
 string containerId = "POSEvents";
+
+// Enable OTel and route it to App Insights.
+// It will automatically read the APPLICATIONINSIGHTS_CONNECTION_STRING from the environment.
+if (!string.IsNullOrEmpty(appInsightsString))
+{
+    // Cloud mode: Enable OTel and route to Azure Application Insights
+    builder.Services.AddOpenTelemetry().UseAzureMonitor();
+    Console.WriteLine("[+] Application Insights Telemetry Enabled.");
+}
+else
+{
+    // Local mode: Skip OTel so the app doesn't crash on desktop
+    Console.WriteLine("[-] APPLICATIONINSIGHTS_CONNECTION_STRING missing. Telemetry disabled for local run.");
+}
 
 // 2. DEPENDENCY INJECTION
 // We register the Cosmos DB Container as a Singleton so we don't exhaust SNAT ports by creating a new client per request.
