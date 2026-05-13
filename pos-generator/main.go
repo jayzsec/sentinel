@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -10,6 +11,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 )
 
 // POSEvent represents a single action taken on a POS terminal
@@ -32,6 +39,38 @@ var terminals = []string{"Front Bar 1", "Front Bar 2", "Dining Room POS", "Patio
 var staffRoles = []string{"Manager", "Bartender", "Server", "Temporary Seasonal Staff"}
 var normalActions = []string{"Order", "Payment"}
 var venues = []string{"V-Brisbane-CBD", "V-GoldCoast", "V-SunshineCoast"}
+
+func initTracer() *sdktrace.TracerProvider {
+	ctx := context.Background()
+
+	exporter, err := otlptracehttp.New(ctx,
+		otlptracehttp.WithInsecure(),
+	)
+	if err != nil {
+		fmt.Printf("[FATAL] Failed to initialize OTLP exporter: %v\n", err)
+		os.Exit(1)
+	}
+
+	res, err := resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceName("pos-generator"),
+			semconv.ServiceVersion("1.0.0"),
+		),
+	)
+	if err != nil {
+		fmt.Printf("[FATAL] Failed to create resource: %v\n", err)
+		os.Exit(1)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	return tp
+}
 
 // generateNormalEvent creates a perfectly healthy, standard restaurant transaction.
 func generateNormalEvent(rng *rand.Rand, venueID string) POSEvent {
@@ -141,6 +180,14 @@ func transmitEvent(client *http.Client, targetURL string, event POSEvent) {
 }
 
 func main() {
+	//Initialise Otel Tracer
+	tp := initTracer()
+	defer func() {
+		if err := tp.Shutdown(context.Background()); err != nil {
+			fmt.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
+
 	// Initialise randomiser
 	seed := uint64(time.Now().UnixNano())
 	rng := rand.New(rand.NewPCG(seed, seed))
