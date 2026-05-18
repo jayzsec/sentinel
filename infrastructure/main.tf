@@ -183,7 +183,7 @@ resource "azurerm_container_app" "analytics" {
       cpu    = 0.25
       # For now, we use a placeholder image. In a full CI/CD pipeline,
       # GitHub Actions would push our compiled C# image to ACR and update this tag.
-      image  = "${azurerm_container_registry.acr.login_server}/analytics-engine:v3"
+      image  = "${azurerm_container_registry.acr.login_server}/analytics-engine:v4"
       memory = "0.5Gi"
       name   = "analytics-engine"
 
