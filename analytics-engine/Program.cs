@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Newtonsoft.Json;
 using System.Net;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
+using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,17 +31,24 @@ else
 
 // 2. DEPENDENCY INJECTION
 // We register the Cosmos DB Container as a Singleton so we don't exhaust SNAT ports by creating a new client per request.
-builder.Services.AddSingleton<Container>(sp =>
+// FIX 1: Register the CosmosClient itself so [FromServices] can find it.
+// FIX 2: Add ConnectionMode.Gateway to fix the 408 Timeout.
+builder.Services.AddSingleton<CosmosClient>(sp =>
 {
-    CosmosClient cosmosClient = new CosmosClient(endpointUri, primaryKey, new CosmosClientOptions()
+    return new CosmosClient(endpointUri, primaryKey, new CosmosClientOptions()
     {
+        ConnectionMode = ConnectionMode.Gateway,
         SerializerOptions = new CosmosSerializationOptions()
         {
             PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase
         }
     });
-    
-    // Auto-create the database and container if they don't exist (Great for dev environments)
+});
+
+// Register the Container by pulling the registered CosmosClient
+builder.Services.AddSingleton<Container>(sp =>
+{
+    var cosmosClient = sp.GetRequiredService<CosmosClient>();
     Database database = cosmosClient.CreateDatabaseIfNotExistsAsync(databaseId).GetAwaiter().GetResult();
     return database.CreateContainerIfNotExistsAsync(containerId, "/venue_id").GetAwaiter().GetResult();
 });
@@ -102,6 +110,72 @@ app.MapGet("/dashboard/{venueId}", async (string venueId, Container container) =
     }
 
     return Results.Ok(events);
+});
+
+// 5. THE API for index.html
+//app.MapGet("/api/events/latest", async (CosmosClient cosmos, ILogger<Program> logger) =>
+
+// Add [FromServices] to explicitly declare these are injected dependencies, not HTTP body payloads.
+// FIX 3: We now just inject the `Container` directly instead of rebuilding it, ensuring it targets "POSEvents"
+// 5. THE API for index.html
+app.MapGet("/api/events/latest", async ([FromServices] Container container, [FromServices] ILogger<Program> logger) =>
+{
+    try
+    {
+        long yesterdayEpoch = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds();
+
+        // 1. Count Total Events
+        var countQuery = new QueryDefinition("SELECT VALUE COUNT(1) FROM c WHERE c._ts >= @yesterday")
+            .WithParameter("@yesterday", yesterdayEpoch);
+        using var countIterator = container.GetItemQueryIterator<int>(countQuery);
+        int events24h = countIterator.HasMoreResults ? (await countIterator.ReadNextAsync()).FirstOrDefault() : 0;
+
+        // 2. Count Active Terminals
+        var terminalQuery = new QueryDefinition("SELECT DISTINCT VALUE c.terminal FROM c WHERE c._ts >= @yesterday")
+            .WithParameter("@yesterday", yesterdayEpoch);
+        using var terminalIterator = container.GetItemQueryIterator<string>(terminalQuery);
+        var activeTerminals = new HashSet<string>();
+        while (terminalIterator.HasMoreResults)
+        {
+            var response = await terminalIterator.ReadNextAsync();
+            foreach (var terminal in response) activeTerminals.Add(terminal);
+        }
+
+        // Notice we just use SELECT * now, because the POSEvent class handles the mapping
+         var feedQuery = new QueryDefinition("SELECT TOP 10 * FROM c ORDER BY c._ts DESC");
+
+        // We replace <dynamic> with <POSEvent>
+        using var feedIterator = container.GetItemQueryIterator<POSEvent>(feedQuery);
+
+        var recentEvents = new List<POSEvent>();
+        while (feedIterator.HasMoreResults)
+        {
+            recentEvents.AddRange(await feedIterator.ReadNextAsync());
+        }
+
+        // 4. The JSON Serializer Bridge & Formatter
+        var safeEvents = recentEvents.Select(e => new
+        {
+            timestamp = e.Timestamp,
+            venueId = e.VenueID,
+            terminalId = e.Terminal,
+            action = string.IsNullOrEmpty(e.Action) ? "System" : e.Action, // Fallback if missing
+            amount = $"${e.Amount:0.00}" // No casting required because e.Amount is already a double!
+        }).ToList();
+
+        return Results.Ok(new
+        {
+            activeTerminals = activeTerminals.Count,
+            eventsProcessed24h = events24h,
+            threatsBlocked = 0,
+            latestEvents = safeEvents
+        });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to retrieve telemetry.");
+        return Results.Problem("Telemetry database unreachable.");
+    }
 });
 
 // Add this right above app.Run();

@@ -1,120 +1,314 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel SOC | Live Dashboard</title>
+    <title>Sentinel SOC | Live Telemetry</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; }
-        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 1rem; margin-bottom: 2rem; }
-        .header h1 { margin: 0; color: #38bdf8; font-size: 1.5rem; letter-spacing: 1px; text-transform: uppercase; }
-        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem; }
-        .stat-card { background: #1e293b; padding: 1.5rem; border-radius: 8px; border-top: 4px solid #38bdf8; }
-        .stat-card.alert { border-top-color: #ef4444; }
-        .stat-title { font-size: 0.875rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.5rem; }
-        .stat-value { font-size: 2rem; font-weight: bold; margin: 0; }
-        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; }
-        th, td { padding: 1rem; text-align: left; border-bottom: 1px solid #334155; }
-        th { background: #0f172a; color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px; }
-        tr:hover { background: #334155; }
-        .badge { padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; }
-        .badge-order { background: #0ea5e9; color: #fff; }
-        .badge-void { background: #ef4444; color: #fff; animation: pulse 2s infinite; }
-        .badge-payment { background: #10b981; color: #fff; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
-        select { background: #1e293b; color: #fff; border: 1px solid #334155; padding: 0.5rem; border-radius: 4px; outline: none; }
+        /* 1. Design System & Theming */
+        :root {
+            --bg-base: #f4f5f7;
+            --bg-surface: #ffffff;
+            --text-primary: #111827;
+            --text-secondary: #4b5563;
+            --border-color: #e5e7eb;
+            --accent-blue: #2563eb;
+            --accent-red: #dc2626;
+            --accent-green: #16a34a;
+            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        [data-theme="dark"] {
+            --bg-base: #0f172a;
+            --bg-surface: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --border-color: #334155;
+            --accent-blue: #3b82f6;
+            --accent-red: #ef4444;
+            --accent-green: #22c55e;
+        }
+
+        /* 2. Reset & Base Styles */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: var(--font-family);
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            line-height: 1.5;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        /* 3. Layout Structure */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 1rem;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 0 2rem 0;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 2rem;
+        }
+
+        .branding h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.025em; }
+        .branding p { font-size: 0.875rem; color: var(--text-secondary); }
+
+        /* Theme Toggle Button */
+        .theme-toggle {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .theme-toggle:hover { filter: brightness(1.1); }
+
+        /* 4. Dashboard Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .metric-card {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .metric-card h3 { font-size: 0.875rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+        .metric-card .value { font-size: 2rem; font-weight: 700; }
+        .metric-card.alert .value { color: var(--accent-red); }
+        .metric-card.safe .value { color: var(--accent-green); }
+
+        /* 5. Live Feed Section */
+        .feed-section {
+            background-color: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            min-height: 400px;
+        }
+
+        .feed-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.75rem;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            color: var(--accent-green);
+        }
+
+        .pulse {
+            width: 8px;
+            height: 8px;
+            background-color: var(--accent-green);
+            border-radius: 50%;
+            animation: pulse-animation 2s infinite;
+        }
+
+        @keyframes pulse-animation {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+        }
+
+        /* 6. Event Log Table */
+        .event-log { width: 100%; border-collapse: collapse; text-align: left; }
+        .event-log th { padding: 0.75rem; color: var(--text-secondary); font-size: 0.875rem; border-bottom: 1px solid var(--border-color); }
+        .event-log td { padding: 0.75rem; font-size: 0.875rem; border-bottom: 1px solid var(--border-color); }
+        .event-log tr:last-child td { border-bottom: none; }
+
+        .badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge.critical { background-color: rgba(239, 68, 68, 0.1); color: var(--accent-red); }
+        .badge.info { background-color: rgba(59, 130, 246, 0.1); color: var(--accent-blue); }
+        .badge.safe { background-color: rgba(34, 197, 94, 0.1); color: var(--accent-green); }
+
+        /* Recruiter Context Banner */
+        .context-banner {
+            background-color: rgba(59, 130, 246, 0.1);
+            border-left: 4px solid var(--accent-blue);
+            padding: 1rem;
+            margin-bottom: 2rem;
+            border-radius: 0 0.5rem 0.5rem 0;
+            font-size: 0.875rem;
+        }
+
+        /* Responsive Mobile Adjustments */
+        @media (max-width: 768px) {
+            .event-log th:nth-child(3), .event-log td:nth-child(3) { display: none; } /* Hide 'Reasoning' column on small screens */
+            .metrics-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
 
-<div class="header">
-    <h1>Sentinel SOC | Anomaly Detection</h1>
-    <select id="venueSelect" onchange="fetchData()">
-        <option value="V-Brisbane-CBD">Brisbane CBD</option>
-        <option value="V-GoldCoast" selected>Gold Coast</option>
-        <option value="V-SunshineCoast">Sunshine Coast</option>
-    </select>
-</div>
+<div class="container">
+    <header>
+        <div class="branding">
+            <h1>Sentinel SOC</h1>
+            <p>Enterprise POS Anomaly Detection</p>
+        </div>
+        <button class="theme-toggle" id="themeToggle">Light Mode</button>
+    </header>
 
-<div class="stats-grid">
-    <div class="stat-card">
-        <div class="stat-title">Total Transactions Analyzed</div>
-        <div class="stat-value" id="totalEvents">0</div>
+    <div class="context-banner">
+        <strong>Architecture Demonstration:</strong> This interface is securely routed via an Envoy Zero-Trust Edge. Telemetry is ingested in real-time by a Go microservice, evaluated by an AI cognitive agent, and served via C# .NET Minimal APIs.
     </div>
-    <div class="stat-card alert">
-        <div class="stat-title">Confirmed Shrinkage (Theft)</div>
-        <div class="stat-value" id="totalStolen">$0.00</div>
-    </div>
-    <div class="stat-card">
-        <div class="stat-title">System Status</div>
-        <div class="stat-value" style="color: #10b981; font-size: 1.5rem;">AI ACTIVE</div>
-    </div>
-</div>
 
-<table>
-    <thead>
-    <tr>
-        <th>Timestamp</th>
-        <th>Terminal</th>
-        <th>Staff ID</th>
-        <th>Action</th>
-        <th>Amount</th>
-        <th>Manager Auth</th>
-    </tr>
-    </thead>
-    <tbody id="eventTableBody">
-    </tbody>
-</table>
+    <section class="metrics-grid">
+        <div class="metric-card safe">
+            <h3>Active Terminals</h3>
+            <div class="value" id="activeTerminals">0</div>
+        </div>
+        <div class="metric-card">
+            <h3>Events Processed (24h)</h3>
+            <div class="value" id="totalEvents">0</div>
+        </div>
+        <div class="metric-card alert">
+            <h3>Threats Mitigated</h3>
+            <div class="value" id="threatsBlocked">0</div>
+        </div>
+    </section>
+
+    <section class="feed-section">
+        <div class="feed-header">
+            <h2>Live Telemetry Feed</h2>
+            <div class="status-indicator">
+                <div class="pulse"></div>
+                W3C OpenTelemetry Stream Connected
+            </div>
+        </div>
+
+        <div style="overflow-x: auto;">
+            <table class="event-log">
+                <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Venue / Terminal</th>
+                    <th>Amount</th>
+                    <th>Action</th>
+                </tr>
+                </thead>
+                <tbody id="eventTableBody">
+                <tr>
+                    <td>16:33:14 AEST</td>
+                    <td>V-GoldCoast (main-bar)</td>
+                    <td>Sweethearting pattern detected. Multiple high-value voids following cash drawer opens.</td>
+                    <td><span class="badge critical">PIN Revoked</span></td>
+                </tr>
+                <tr>
+                    <td>16:31:02 AEST</td>
+                    <td>V-Brisbane-CBD (patio-1)</td>
+                    <td>Nominal transaction flow.</td>
+                    <td><span class="badge info">Logged</span></td>
+                </tr>
+                <tr>
+                    <td>16:28:45 AEST</td>
+                    <td>V-Brisbane-CBD (register-2)</td>
+                    <td>Nominal transaction flow.</td>
+                    <td><span class="badge info">Logged</span></td>
+                </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
 
 <script>
-    async function fetchData() {
-        const venue = document.getElementById('venueSelect').value;
+    // Theme Toggling Logic (Unchanged)
+    const themeToggle = document.getElementById('themeToggle');
+    const htmlElement = document.documentElement;
+
+    themeToggle.addEventListener('click', () => {
+        const currentTheme = htmlElement.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        htmlElement.setAttribute('data-theme', newTheme);
+        themeToggle.textContent = newTheme === 'dark' ? 'Light Mode' : 'Dark Mode';
+    });
+
+    // Live Telemetry Polling
+    async function fetchLiveTelemetry() {
         try {
-            const response = await fetch(`/dashboard/${venue}`);
+            const response = await fetch('/api/events/latest');
+            if (!response.ok) throw new Error('Network response was not ok');
+
             const data = await response.json();
 
-            document.getElementById('totalEvents').innerText = data.length;
+            // 1. Update Top-Level Metrics (Safely mapped to the new HTML ID)
+            document.getElementById('activeTerminals').innerText = data.activeTerminals;
+            document.getElementById('totalEvents').innerText = data.eventsProcessed24h.toLocaleString();
+            document.getElementById('threatsBlocked').innerText = data.threatsBlocked;
 
-            let stolenAmount = 0;
-            let tableHTML = '';
+            // 2. Rebuild the Table Rows
+            const tableBody = document.getElementById('eventTableBody');
+            tableBody.innerHTML = ''; // Clear the old data
 
-            data.forEach(event => {
-                // Format Timestamp
-                const timeString = new Date(event.timestamp).toLocaleTimeString();
+            data.latestEvents.forEach(evt => {
+                const tr = document.createElement('tr');
 
-                // Determine Badge Color
-                let badgeClass = 'badge-order';
-                if (event.action === 'Void') {
-                    badgeClass = 'badge-void';
-                    stolenAmount += event.amount; // Tally the stolen money
-                } else if (event.action === 'Payment') {
-                    badgeClass = 'badge-payment';
+                // Parse timestamp safely
+                const dateObj = new Date(evt.timestamp);
+                const timeString = dateObj.toLocaleTimeString('en-AU', { hour12: false }) + ' AEST';
+
+                // Determine badge color dynamically (Optional, but looks great for portfolios)
+                let badgeClass = 'info';
+                if (evt.action === 'Void' || evt.action === 'Refund') {
+                    badgeClass = 'critical'; // Highlights suspicious actions in red
+                } else if (evt.action === 'Payment') {
+                    badgeClass = 'safe'; // You can add a .safe CSS class for green if you want!
                 }
 
-                tableHTML += `
-                        <tr>
-                            <td style="color: #94a3b8;">${timeString}</td>
-                            <td>${event.terminal}</td>
-                            <td>${event.staff_id}</td>
-                            <td><span class="badge ${badgeClass}">${event.action}</span></td>
-                            <td style="font-family: monospace; font-size: 1.1rem;">$${event.amount.toFixed(2)}</td>
-                            <td style="color: #ef4444;">${event.manager_id || '--'}</td>
-                        </tr>
-                    `;
+                tr.innerHTML = `
+                    <td>${timeString}</td>
+                    <td>${evt.venueId} (${evt.terminalId})</td>
+                    <td style="font-family: monospace; font-weight: 600;">${evt.amount}</td>
+                    <td><span class="badge ${badgeClass}">${evt.action}</span></td>
+                `;
+
+                tableBody.appendChild(tr);
             });
 
-            document.getElementById('eventTableBody').innerHTML = tableHTML;
-            document.getElementById('totalStolen').innerText = `$${stolenAmount.toFixed(2)}`;
+            // 3. Ensure status indicator shows green/connected
+            document.querySelector('.status-indicator').innerHTML = `
+                <div class="pulse"></div> W3C OpenTelemetry Stream Connected
+            `;
 
         } catch (error) {
-            console.error("Failed to fetch data:", error);
-            document.getElementById('eventTableBody').innerHTML = `<tr><td colspan="6" style="color: #ef4444; text-align: center;">Connection to Analytics Engine lost.</td></tr>`;
+            console.error("Telemetry pipeline disconnected:", error);
+            document.querySelector('.status-indicator').innerHTML = `
+                <span style="color: var(--accent-red); font-weight: 600;">Pipeline Offline / Reconnecting...</span>
+            `;
         }
     }
 
-    // Fetch immediately on load, and then refresh every 3 seconds to create a live dashboard effect
-    fetchData();
-    setInterval(fetchData, 3000);
+    // Initial fetch, then poll every 5 seconds
+    fetchLiveTelemetry();
+    setInterval(fetchLiveTelemetry, 5000);
 </script>
 </body>
 </html>
