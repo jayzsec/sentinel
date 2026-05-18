@@ -5,11 +5,64 @@ terraform {
       source = "hashicorp/azurerm"
       version = "~> 4.71.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.19.1"
+    }
   }
 }
 
 provider "azurerm" {
   features {}
+}
+
+provider "cloudflare" {
+  # Terraform automatically looks for the CLOUDFLARE_API_TOKEN env var
+}
+
+# 1. Create the CNAME for ai.cabang.dev
+resource "cloudflare_dns_record" "api_gateway" {
+  zone_id = var.cloudflare_zone_id
+  name    = "ai"
+  content = azurerm_container_app.api_gateway.ingress[0].fqdn
+  type    = "CNAME"
+  proxied = false
+  ttl     = 1 # 1 equals 'Auto' in Cloudflare
+}
+
+# 2. Create the secret TXT record Azure needs to "trust" you
+resource "cloudflare_dns_record" "azure_verification" {
+  zone_id = var.cloudflare_zone_id
+  name    = "asuid.ai"
+  content = azurerm_container_app.api_gateway.custom_domain_verification_id
+  type    = "TXT"
+  ttl     = 1
+}
+
+# 3. Tell Azure to bind the domain
+resource "azurerm_container_app_custom_domain" "binding" {
+  container_app_id = azurerm_container_app.api_gateway.id
+  name             = "ai.cabang.dev"
+  # defaults to null
+  # certificate_binding_type = "SniEnabled"
+  # our cert id
+  # container_app_environment_managed_certificate_id = azurerm_container_app_environment_managed_certificate.ai_cert.id
+  # Wait for Cloudflare to finish before Azure verifies
+  depends_on = [cloudflare_dns_record.azure_verification]
+  lifecycle {
+    ignore_changes = [
+      certificate_binding_type,
+      container_app_environment_certificate_id
+    ]
+  }
+}
+
+resource "azurerm_container_app_environment_managed_certificate" "ai_cert" {
+  # The name at the very end of your manual certificate ID string
+  name                         = "ai.cabang.dev-rg-hospi-260515142946"
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  subject_name                 = "ai.cabang.dev"
+  domain_control_validation    = "CNAME"
 }
 
 # Resource group
@@ -364,4 +417,96 @@ resource "azurerm_application_insights" "appinsights" {
   resource_group_name = azurerm_resource_group.rg.name
   workspace_id        = azurerm_log_analytics_workspace.law.id
   application_type    = "web"
+}
+
+locals {
+  envoy_config = <<EOF
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+static_resources:
+  listeners:
+  - name: listener_0
+    address:
+      socket_address: { address: 0.0.0.0, port_value: 8080 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: backend
+              domains: ["*"]
+              routes:
+              # 1. Hard block the ingest endpoint from the public
+              - match: { prefix: "/ingest" }
+                direct_response:
+                  status: 403
+                  body: { inline_string: "Direct ingestion forbidden by Sentinel SOC API Gateway." }
+              # 2. Route the Dashboard UI to the internal C# engine
+              - match: { prefix: "/" }
+                route:
+                  cluster: analytics_engine
+                  timeout: 60s
+                  auto_host_rewrite: true
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+  - name: analytics_engine
+    type: LOGICAL_DNS
+    dns_lookup_family: V4_ONLY
+    load_assignment:
+      cluster_name: analytics_engine
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: ${azurerm_container_app.analytics.ingress[0].fqdn}
+                port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: ${azurerm_container_app.analytics.ingress[0].fqdn}
+EOF
+}
+
+resource "azurerm_container_app" "api_gateway" {
+  name                         = "api-gateway"
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  resource_group_name          = azurerm_resource_group.rg.name
+  revision_mode                = "Single"
+
+  template {
+    container {
+      name    = "envoy-proxy"
+      image   = "envoyproxy/envoy:v1.30-latest"
+      cpu     = 0.25
+      memory  = "0.5Gi"
+
+      # FIX: Write the decoded YAML to /tmp/ instead of /etc/
+      command = ["/bin/sh", "-c"]
+      args    = ["echo $ENVOY_CONF_B64 | base64 -d > /tmp/envoy.yaml && envoy -c /tmp/envoy.yaml"]
+      env {
+        name  = "ENVOY_CONF_B64"
+        value = base64encode(local.envoy_config)
+      }
+    }
+  }
+
+  ingress {
+    allow_insecure_connections = false
+    external_enabled           = true  # The only public entry point
+    target_port                = 8080
+    traffic_weight {
+      percentage      = 100
+      latest_revision = true
+    }
+  }
 }
