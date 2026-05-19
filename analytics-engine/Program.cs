@@ -33,6 +33,8 @@ else
 // We register the Cosmos DB Container as a Singleton so we don't exhaust SNAT ports by creating a new client per request.
 // FIX 1: Register the CosmosClient itself so [FromServices] can find it.
 // FIX 2: Add ConnectionMode.Gateway to fix the 408 Timeout.
+bool isDevelopment = builder.Environment.IsDevelopment();
+
 builder.Services.AddSingleton<CosmosClient>(sp =>
 {
     return new CosmosClient(endpointUri, primaryKey, new CosmosClientOptions()
@@ -41,7 +43,14 @@ builder.Services.AddSingleton<CosmosClient>(sp =>
         SerializerOptions = new CosmosSerializationOptions()
         {
             PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase
-        }
+        },
+        HttpClientFactory = isDevelopment
+            ? () => new HttpClient(new HttpClientHandler
+            {
+                ServerCertificateCustomValidationCallback =
+                    HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+            })
+            : null
     });
 });
 
