@@ -49,6 +49,7 @@ type AIResponse struct {
 // initTracer wires up OpenTelemetry to export traces via HTTP OTLP
 func initTracer() *sdktrace.TracerProvider {
 	ctx := context.Background()
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	// 1. Configure the OTLP Exporter
 	// This takes the traces and fires them over the network instead of printing them to the console.
 	// We allow the endpoint to be injected via environment variables for cloud deployment.
@@ -57,6 +58,7 @@ func initTracer() *sdktrace.TracerProvider {
 	// Port 4317 is the industry standard port for OpenTelemetry over gRPC, previous we are using Port 4318 which is the standard port for OpenTelemetry over HTTP
 	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithInsecure(), // Used for internal cluster routing
+		otlptracegrpc.WithEndpoint(endpoint),
 	)
 	if err != nil {
 		fmt.Printf("[FATAL] Failed to initialize OTLP exporter: %v\n", err)
