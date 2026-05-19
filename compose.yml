@@ -1,11 +1,28 @@
 services:
 
+  # The Gateway
+  envoy:
+    image: docker.io/envoyproxy/envoy:v1.38.0 # 1.38.0 is the latest version and 1.30~ tested in the stack
+    ports:
+      - "8080:8080" # Local Dashboard Access
+    volumes:
+      - ./envoy-local.yaml:/etc/envoy/envoy.yaml
+    depends_on:
+      - analytics
+      - sentinel
+    networks:
+      - hospitality-net
+
   # Core / Brain / Go Security Agent
   sentinel:
     build:
       context: ./sentinel-soc
-    ports:
-      - "8080:8080" # Exposes the API to our local machine so we can still use cURL
+    environment:
+      - REDIS_ADDR=redis:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
+      - ANALYTICS_URL=http://analytics:8080/ingest
+    depends_on:
+      - redis
     networks:
       - hospitality-net
 
@@ -15,9 +32,16 @@ services:
       context: ./analytics-engine
     ports:
       - "5192:8080" # Maps local port 5192 to the container's port 8080
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - COSMOS_ENDPOINT=${LOCAL_COSMOS_ENDPOINT}
+      - COSMOS_KEY=${LOCAL_COSMOS_KEY}
+      - OTLP_ENDPOINT=jaeger:4317
+    depends_on:
+      cosmos-db:
+        condition: service_healthy   # ← wait until emulator is actually ready
     networks:
       - hospitality-net
-
   # API / Floor Stream
   generator:
     build:
@@ -26,9 +50,51 @@ services:
     # We tell the generator to look for the host named "sentinel" on the Docker network
       - SENTINEL_URL=http://sentinel:8080/events
       - ANALYTICS_URL=http://analytics:8080/ingest
+      - OTLP_ENDPOINT=jaeger:4317
     depends_on:
       - sentinel
       - analytics
+    networks:
+      - hospitality-net
+
+  # 4. Mocked Infrastructure
+  redis:
+    image: docker.io/library/redis:8.6.3-alpine # 8.6.3 is the latest version and 7.0~ tested in the stack
+    ports:
+      - "6379:6379"
+    networks:
+      - hospitality-net
+
+  cosmos-db:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+    environment:
+      - AZURE_COSMOS_EMULATOR_PARTITION_COUNT=3
+      - AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE=true
+    ports:
+      - "8081:8081"
+      - "10251-10255:10251-10255" # Required for Direct Mode TCP routing
+    #CRASH. Reason: 0x00000004 - Intel architecture hybrid P and E cores
+    # FIX: Pin the emulator to exactly 4 symmetrical cores (0, 1, 2, and 3)
+    cpuset: "0-3"
+    # Cosmos is a memory hog. Capping it at 3GB prevents Podman OOM kills.
+    mem_limit: 3G
+    networks:
+      - hospitality-net
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "-k", "https://localhost:8081/_explorer/emulator.pem" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s   # give the emulator time to boot before checks begin
+
+  jaeger:
+    image: docker.io/jaegertracing/jaeger:2.6.0
+    volumes:
+      - ./jaeger-config.yaml:/etc/jaeger/config.yaml
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    ports:
+      - "16686:16686"  # Jaeger Web UI
+      - "4317:4317"    # OTLP gRPC receiver
     networks:
       - hospitality-net
 
